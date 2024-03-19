@@ -1,0 +1,93 @@
+name: Generate Release
+
+on:
+  workflow_dispatch:
+
+jobs:
+
+  build:
+
+    strategy:
+      matrix:
+        configuration: [Release]
+        dotnet-version: [ '8.0.x' ]
+        platform: [ win-x64, linux-x64 ]
+
+    runs-on: ubuntu-latest
+
+    env:
+      ManagerExecutable_Name: SIT.Manager.Avalonia.Desktop
+      UpdaterExecutable_Name: SIT.Manager.Updater
+      DeploymentFolder_Name: deployment
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          
+      - name: Setup dotnet ${{ matrix.dotnet-version }}
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ matrix.dotnet-version }}
+
+      - name: Publish Manager Executable
+        run: dotnet publish ${{ env.ManagerExecutable_Name }} -c ${{ matrix.configuration }} -r ${{ matrix.platform }} -o ${{ env.DeploymentFolder_Name }}
+
+      - name: Publish Updater Executable
+        if: startsWith(matrix.platform, 'win')
+        run: dotnet publish ${{ env.UpdaterExecutable_Name }} -c ${{ matrix.configuration }} -r ${{ matrix.platform }} -o ${{ env.DeploymentFolder_Name }}
+      
+      - name: Remove pdb files
+        run: rm ${{ env.DeploymentFolder_Name }}/*.pdb -f
+
+      - name: Get version from Executable
+        id: extract-version
+        run: |
+          export version=$(find . -name "${{ env.ManagerExecutable_Name }}*" | xargs -I {} dotnet msbuild /verbosity:minimal /property:ProductVersion {} | xpath //PropertyGroup/ProductVersion | sed 's/<\/ProductVersion>//' | tr '\n' ' ')
+          echo "MANAGER_VERSION=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Artifact
+        id: artifact-upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform}}
+          path: ${{ env.DeploymentFolder_Name }}
+
+      - name: Output Artifact
+        run: echo "${{ matrix.platform }}=${{ steps.artifact-upload.outputs.download-url }}" >> "$GITHUB_OUTPUT"
+
+  GenerateRelease:
+
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get Windows Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: win-x64
+          path: win_extracted
+
+      - name: Get Linux Artifact
+        uses: actions/download-artifact@v4
+        id: download-linux
+        with:
+          name: linux-x64
+          path: linux_extracted
+
+      - name: Tar Linux Artifact
+        run: find linux_extracted -printf "%P\n" | tar -czf linux-x64.tar.gz --no-recursion -C linux_extracted -T -
+
+      - name: Zip Windows Artifact
+        run: (cd win_extracted && zip -r ../win-x64.zip . && cd ..)
+
+      - name: Generate Release Draft
+        uses: softprops/action-gh-release@v1
+        with:
+          draft: true
+          generate_release_notes: true
+          files: |
+            win-x64.zip
+            linux-x64.tar.gz
+          tag_name: ${{ needs.build.outputs.MANAGER_VERSION }}
